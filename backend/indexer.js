@@ -1,3 +1,21 @@
+import {
+  initDb,
+  insertPages,
+  insertPostings,
+  insertEmbeddings,
+  getPageCount,
+  getPageData,
+  getPageDataBatch,
+  batchSearchTerms,
+  getDocLengths,
+  getAvgDocLength,
+  getMissingEmbeddingIds as dbGetMissingEmbeddingIds,
+  getEmbedding,
+  getAllEmbeddings,
+  getMaxPageId,
+  getDb,
+} from './db.js'
+
 const STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
   'of', 'with', 'by', 'from', 'is', 'it', 'as', 'be', 'was', 'are',
@@ -11,7 +29,6 @@ const STOP_WORDS = new Set([
 ])
 
 const MAX_TEXT_STORE = 3000
-const EMBED_DIM = 384
 
 function tokenize(text) {
   return text
@@ -19,15 +36,6 @@ function tokenize(text) {
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter(token => token.length > 1)
-}
-
-function recalculateIdf(index, totalDocs) {
-  for (const [, postings] of index) {
-    const idf = Math.log(totalDocs / postings.length)
-    for (const posting of postings) {
-      posting.score = posting.freq * idf
-    }
-  }
 }
 
 function normalizeVector(vec) {
@@ -40,167 +48,155 @@ function cosineSimilarity(a, b) {
   return a.reduce((sum, val, i) => sum + val * b[i], 0)
 }
 
-export function buildIndex(pages) {
-  const index = new Map()
-  const pageData = new Map()
+export async function buildIndex(pages) {
+  const db = await initDb()
+  const ids = await insertPages(pages)
 
   for (let i = 0; i < pages.length; i++) {
-    const { url, title, text } = pages[i]
-    pageData.set(i, { url, title, text: text.substring(0, MAX_TEXT_STORE) })
-
-    const tokens = tokenize(text)
+    const tokens = tokenize(pages[i].text)
     const termFreq = new Map()
-
     for (const token of tokens) {
       if (STOP_WORDS.has(token)) continue
       termFreq.set(token, (termFreq.get(token) || 0) + 1)
     }
-
-    for (const [term, freq] of termFreq) {
-      if (!index.has(term)) {
-        index.set(term, [])
-      }
-      index.get(term).push({ pageId: i, freq })
-    }
+    await insertPostings(ids[i], termFreq)
   }
 
-  recalculateIdf(index, pageData.size)
-
-  console.log(`[indexer] Indexed ${pageData.size} pages, ${index.size} unique terms.`)
-  return { index, pageData, embeddings: new Map() }
+  console.log(`[indexer] Indexed ${pages.length} pages.`)
+  return { db }
 }
 
-export function addToIndex(indexData, newPages) {
-  const { index, pageData } = indexData
-  let nextId = pageData.size
+export async function addToIndex(indexData, newPages) {
+  const ids = await insertPages(newPages)
 
-  for (const page of newPages) {
-    const id = nextId++
-    pageData.set(id, { url: page.url, title: page.title, text: page.text.substring(0, MAX_TEXT_STORE) })
-
-    const tokens = tokenize(page.text)
+  for (let i = 0; i < newPages.length; i++) {
+    const tokens = tokenize(newPages[i].text)
     const termFreq = new Map()
-
     for (const token of tokens) {
       if (STOP_WORDS.has(token)) continue
       termFreq.set(token, (termFreq.get(token) || 0) + 1)
     }
+    await insertPostings(ids[i], termFreq)
+  }
+}
 
-    for (const [term, freq] of termFreq) {
-      if (!index.has(term)) {
-        index.set(term, [])
+export async function setEmbeddings(indexData, pageIds, embeddings) {
+  const normalized = embeddings.map(normalizeVector)
+  await insertEmbeddings(pageIds, normalized)
+}
+
+export async function getMissingEmbeddingIds(indexData) {
+  return dbGetMissingEmbeddingIds()
+}
+
+export async function search(indexData, query, queryEmbedding = null) {
+  const tokens = tokenize(query).filter(t => !STOP_WORDS.has(t))
+  if (tokens.length === 0 && !queryEmbedding) return []
+
+  const totalPages = await getPageCount()
+  if (totalPages === 0) return []
+
+  const scores = new Map()
+  const urlMatched = new Set()
+  const K1 = 1.2
+  const B = 0.75
+
+  if (tokens.length > 0) {
+    const allPostings = await batchSearchTerms(tokens)
+    const avgDl = await getAvgDocLength()
+
+    const byTerm = new Map()
+    for (const p of allPostings) {
+      if (!byTerm.has(p.term)) byTerm.set(p.term, [])
+      byTerm.get(p.term).push(p)
+    }
+
+    const candidateIds = [...new Set(allPostings.map(p => p.page_id))]
+    const docLengths = await getDocLengths(candidateIds)
+
+    for (const [term, postings] of byTerm) {
+      const df = postings.length
+      const idf = Math.log((totalPages - df + 0.5) / (df + 0.5) + 1)
+
+      for (const { page_id, freq } of postings) {
+        const dl = docLengths.get(page_id) || 1
+        const tfNorm = (freq * (K1 + 1)) / (freq + K1 * (1 - B + B * (dl / (avgDl || 1))))
+        scores.set(page_id, (scores.get(page_id) || 0) + idf * tfNorm)
       }
-      index.get(term).push({ pageId: id, freq })
+    }
+
+    if (candidateIds.length > 0) {
+      const pages = await getPageDataBatch(candidateIds)
+      for (const page of pages) {
+        const urlLower = page.url.toLowerCase()
+        const titleLower = (page.title || '').toLowerCase()
+        let boost = 0
+
+        for (const token of tokens) {
+          if (urlLower.includes(token)) {
+            boost += 30
+            urlMatched.add(page.id)
+          } else if (titleLower.includes(token)) {
+            boost += 15
+          }
+        }
+
+        if (boost > 0) {
+          scores.set(page.id, (scores.get(page.id) || 0) + boost)
+        }
+      }
     }
   }
 
-  recalculateIdf(index, pageData.size)
-}
+  if (queryEmbedding) {
+    const normQuery = normalizeVector(queryEmbedding)
+    const allEmbeddings = await getAllEmbeddings()
+    const SIM_THRESHOLD = 0.25
 
-export function setEmbeddings(indexData, pageIds, embeddings) {
-  for (let i = 0; i < pageIds.length; i++) {
-    indexData.embeddings.set(pageIds[i], normalizeVector(embeddings[i]))
+    for (const [pageId, emb] of allEmbeddings) {
+      const sim = cosineSimilarity(normQuery, emb)
+      if (sim > SIM_THRESHOLD) {
+        scores.set(pageId, (scores.get(pageId) || 0) + sim * 50)
+      }
+    }
   }
-}
 
-export function getMissingEmbeddingIds(indexData) {
-  const missing = []
-  for (const [id] of indexData.pageData) {
-    if (!indexData.embeddings.has(id)) missing.push(id)
-  }
-  return missing
+  const resultIds = [...scores.keys()]
+  if (resultIds.length === 0) return []
+
+  const pages = await getPageDataBatch(resultIds)
+  const results = pages.map(page => ({
+    url: page.url,
+    title: page.title,
+    score: scores.get(page.id) || 0,
+    urlMatch: urlMatched.has(page.id),
+  }))
+
+  const urlResults = results.filter(r => r.urlMatch).sort((a, b) => b.score - a.score)
+  const otherResults = results.filter(r => !r.urlMatch).sort((a, b) => b.score - a.score)
+
+  return [...urlResults, ...otherResults].slice(0, 20)
 }
 
 export function serializeIndex(indexData) {
-  return {
-    index: Object.fromEntries(indexData.index),
-    pageData: Object.fromEntries(indexData.pageData),
-    embeddings: Object.fromEntries(
-      [...indexData.embeddings].map(([k, v]) => [k, Array.from(v)])
-    ),
-  }
+  return {}
 }
 
 export function deserializeIndex(raw) {
-  const pageData = new Map()
-  for (const [k, v] of Object.entries(raw.pageData)) {
-    pageData.set(Number(k), {
-      url: v.url,
-      title: v.title,
-      text: v.text || '',
-    })
-  }
-
-  const embeddings = new Map()
-  if (raw.embeddings) {
-    for (const [k, v] of Object.entries(raw.embeddings)) {
-      embeddings.set(Number(k), v)
-    }
-  }
-
-  return {
-    index: new Map(Object.entries(raw.index)),
-    pageData,
-    embeddings,
-  }
+  return { db: getDb() }
 }
 
-export function search(indexData, query, queryEmbedding = null) {
-  const { index, pageData, embeddings } = indexData
-  const tokens = tokenize(query).filter(t => !STOP_WORDS.has(t))
+export async function getIndexStats(indexData) {
+  const db = getDb()
+  if (!db) return { pages: 0, terms: 0, embeddings: 0 }
 
-  if (tokens.length === 0 && !queryEmbedding) return []
+  const pageRow = await db.get('SELECT COUNT(*) as c FROM pages')
+  const termRow = await db.get('SELECT COUNT(DISTINCT term) as c FROM postings')
+  const embRow = await db.get('SELECT COUNT(*) as c FROM embeddings')
 
-  const scores = new Map()
-
-  for (const token of tokens) {
-    const postings = index.get(token)
-    if (!postings) continue
-
-    for (const { pageId, score } of postings) {
-      scores.set(pageId, (scores.get(pageId) || 0) + score)
-    }
+  return {
+    pages: pageRow.c,
+    terms: termRow.c,
+    embeddings: embRow.c,
   }
-
-  const urlMatched = new Set()
-  const titleMatched = new Set()
-
-  for (const [pageId, data] of pageData) {
-    const urlLower = data.url.toLowerCase()
-    const titleLower = (data.title || '').toLowerCase()
-
-    for (const token of tokens) {
-      if (urlLower.includes(token)) {
-        urlMatched.add(pageId)
-        scores.set(pageId, (scores.get(pageId) || 0) + 50)
-      } else if (titleLower.includes(token)) {
-        titleMatched.add(pageId)
-        scores.set(pageId, (scores.get(pageId) || 0) + 10)
-      }
-    }
-  }
-
-  if (queryEmbedding && embeddings.size > 0) {
-    const normQuery = normalizeVector(queryEmbedding)
-    for (const [pageId, pageEmbedding] of embeddings) {
-      const sim = cosineSimilarity(normQuery, pageEmbedding)
-      scores.set(pageId, (scores.get(pageId) || 0) + sim * 100)
-    }
-  }
-
-  const urlResults = []
-  const otherResults = []
-
-  for (const [pageId, score] of scores) {
-    const page = pageData.get(pageId)
-    const snippet = (page.text || '').substring(0, 200).replace(/\s+/g, ' ').trim()
-    const entry = { url: page.url, title: page.title, description: snippet, score }
-    if (urlMatched.has(pageId)) urlResults.push(entry)
-    else otherResults.push(entry)
-  }
-
-  urlResults.sort((a, b) => b.score - a.score)
-  otherResults.sort((a, b) => b.score - a.score)
-
-  return [...urlResults, ...otherResults].slice(0, 10)
 }

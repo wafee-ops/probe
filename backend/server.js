@@ -1,17 +1,20 @@
 import 'dotenv/config'
 import express from 'express'
+import cors from 'cors'
 import { InferenceClient } from '@huggingface/inference'
 import { uploadFiles, downloadFile, createRepo } from '@huggingface/hub'
 import Groq from 'groq-sdk'
+import fs from 'fs'
+import path from 'path'
 import { createCrawler } from './crawler.js'
+import { initDb, getAllUrls, getDbPath, closeDb } from './db.js'
 import {
   buildIndex,
   addToIndex,
   search,
   setEmbeddings,
   getMissingEmbeddingIds,
-  serializeIndex,
-  deserializeIndex,
+  getIndexStats,
 } from './indexer.js'
 
 const HF_TOKEN = process.env.VITE_HUGGINGFACE_API_KEY
@@ -20,15 +23,14 @@ const HF_REPO = 'Wafee8/indexed_pages'
 const EMBED_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
 const EMBED_BATCH_SIZE = 32
 const SAVE_INTERVAL = 50
-const CRAWL_DELAY_MS = 1000
+const CONCURRENT_FETCHES = 5
+const CRAWL_DELAY_MS = 300
 const QUERY_CRAWL_CHANCE = 0.35
-const PAGES_PER_SHARD = 100000
 
 const hf = new InferenceClient(HF_TOKEN)
 const groq = GROQ_KEY ? new Groq({ apiKey: GROQ_KEY }) : null
 
 const SEED_URLS = [
-  // ─── Search & Reference ───
   'https://www.britannica.com/',
   'https://www.wolfram.com/',
   'https://www.desmos.com/',
@@ -38,7 +40,6 @@ const SEED_URLS = [
   'https://www.deepl.com/',
   'https://www.timeanddate.com/',
 
-  // ─── AI & Machine Learning ───
   'https://openai.com/',
   'https://ai.google/',
   'https://www.anthropic.com/',
@@ -49,7 +50,6 @@ const SEED_URLS = [
   'https://stability.ai/',
   'https://www.perplexity.ai/',
 
-  // ─── Development ───
   'https://developer.mozilla.org/en-US/docs/Web/JavaScript',
   'https://developer.mozilla.org/en-US/docs/Web/API',
   'https://developer.mozilla.org/en-US/docs/Learn',
@@ -69,7 +69,7 @@ const SEED_URLS = [
   'https://docs.python.org/3/tutorial/',
   'https://flask.palletsprojects.com/',
   'https://fastapi.tiangolo.com/',
-  'https://django.readthedocs.io/',
+  'https://django.readthedocs.com/',
   'https://rust-lang.org/docs/',
   'https://doc.rust-lang.org/book/',
   'https://go.dev/doc/',
@@ -106,7 +106,6 @@ const SEED_URLS = [
   'https://docs.npmjs.com/',
   'https://pnpm.io/installation',
 
-  // ─── Gaming ───
   'https://store.steampowered.com/',
   'https://www.epicgames.com/',
   'https://www.xbox.com/',
@@ -139,7 +138,6 @@ const SEED_URLS = [
   'https://www.indiedb.com/',
   'https://www.moddb.com/',
 
-  // ─── Social Media & Forums ───
   'https://www.reddit.com/',
   'https://www.reddit.com/r/popular/',
   'https://www.reddit.com/r/technology/',
@@ -163,7 +161,6 @@ const SEED_URLS = [
   'https://mastodon.social/',
   'https://www.tumblr.com/explore',
 
-  // ─── News & Media ───
   'https://www.bbc.com/news',
   'https://www.reuters.com/',
   'https://www.apnews.com/',
@@ -189,7 +186,6 @@ const SEED_URLS = [
   'https://www.npr.org/',
   'https://www.dw.com/',
 
-  // ─── Streaming & Entertainment ───
   'https://www.youtube.com/',
   'https://www.netflix.com/',
   'https://www.twitch.tv/',
@@ -203,7 +199,6 @@ const SEED_URLS = [
   'https://www.vimeo.com/',
   'https://www.goodreads.com/',
 
-  // ─── Shopping & E-Commerce ───
   'https://www.amazon.com/',
   'https://www.ebay.com/',
   'https://www.walmart.com/',
@@ -213,7 +208,6 @@ const SEED_URLS = [
   'https://www.target.com/',
   'https://www.newegg.com/',
 
-  // ─── Education & Learning ───
   'https://www.khanacademy.org/',
   'https://www.coursera.org/',
   'https://www.udemy.com/',
@@ -226,7 +220,6 @@ const SEED_URLS = [
   'https://scholar.google.com/',
   'https://www.jstor.org/',
 
-  // ─── Science & Research ───
   'https://arxiv.org/',
   'https://www.scientificamerican.com/',
   'https://www.nature.com/',
@@ -237,7 +230,6 @@ const SEED_URLS = [
   'https://www.space.com/',
   'https://pubmed.ncbi.nlm.nih.gov/',
 
-  // ─── Health & Fitness ───
   'https://www.webmd.com/',
   'https://www.mayoclinic.org/',
   'https://www.healthline.com/',
@@ -245,7 +237,6 @@ const SEED_URLS = [
   'https://www.cdc.gov/',
   'https://www.nhs.uk/',
 
-  // ─── Finance & Crypto ───
   'https://www.coindesk.com/',
   'https://cointelegraph.com/',
   'https://www.investopedia.com/',
@@ -254,19 +245,16 @@ const SEED_URLS = [
   'https://finance.yahoo.com/',
   'https://www.tradingview.com/',
 
-  // ─── Travel & Maps ───
   'https://www.tripadvisor.com/',
   'https://www.booking.com/',
   'https://www.airbnb.com/',
   'https://www.lonelyplanet.com/',
 
-  // ─── Food & Recipes ───
   'https://www.allrecipes.com/',
   'https://www.bonappetit.com/',
   'https://www.foodnetwork.com/',
   'https://www.seriouseats.com/',
 
-  // ─── Sports ───
   'https://www.espn.com/',
   'https://www.skysports.com/',
   'https://www.nba.com/',
@@ -274,20 +262,17 @@ const SEED_URLS = [
   'https://www.formula1.com/',
   'https://www.ufc.com/',
 
-  // ─── Productivity & Tools ───
   'https://www.figma.com/',
   'https://www.canva.com/',
   'https://www.slack.com/',
   'https://www.notion.so/',
 
-  // ─── Design & Creative ───
   'https://dribbble.com/',
   'https://www.behance.net/',
   'https://unsplash.com/',
   'https://www.pexels.com/',
   'https://www.producthunt.com/',
 
-  // ─── Privacy & Security ───
   'https://www.eff.org/',
   'https://owasp.org/',
   'https://www.virustotal.com/',
@@ -311,8 +296,9 @@ const ARTICLE_SITES = [
 ]
 
 const app = express()
-const PORT = 3000
+const PORT = process.env.PORT || 3000
 
+app.use(cors())
 app.use(express.json())
 
 let indexData = null
@@ -321,15 +307,12 @@ let pagesSinceLastSave = 0
 let crawledByBg = 0
 let searchHistory = new Map()
 let knownUrls = new Set()
-let dirtyShards = new Set()
-let uploadedShards = new Set()
 
 const seedSet = new Set(SEED_URLS.map(u => u.replace(/\/+$/, '')))
 
 function generateQueryUrls(query) {
   const urls = []
   const encoded = encodeURIComponent(query)
-  const slug = query.toLowerCase().replace(/\s+/g, '_')
   const title = query.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('_')
   const dashSlug = query.toLowerCase().replace(/\s+/g, '-')
 
@@ -383,198 +366,46 @@ async function ensureRepoExists() {
   }
 }
 
-function getShardId(pageId) {
-  return Math.floor(pageId / PAGES_PER_SHARD) + 1
-}
-
-function getActiveShardIds() {
-  const ids = new Set()
-  if (!indexData) return ids
-  for (const [pageId] of indexData.pageData) {
-    ids.add(getShardId(pageId))
-  }
-  return ids
-}
-
-function buildShardPayload(shardId) {
-  const { index, pageData, embeddings } = indexData
-  const minId = (shardId - 1) * PAGES_PER_SHARD
-  const maxId = minId + PAGES_PER_SHARD
-
-  const shardPages = new Map()
-  for (const [id, data] of pageData) {
-    if (id >= minId && id < maxId) shardPages.set(id, data)
-  }
-
-  const shardIndex = new Map()
-  for (const [term, postings] of index) {
-    const matching = postings.filter(p => {
-      const sid = getShardId(p.pageId)
-      return sid === shardId
-    })
-    if (matching.length > 0) shardIndex.set(term, matching)
-  }
-
-  const shardEmbeddings = new Map()
-  for (const [id, emb] of embeddings) {
-    if (id >= minId && id < maxId) shardEmbeddings.set(id, emb)
-  }
-
-  return {
-    pageData: Object.fromEntries(shardPages),
-    index: Object.fromEntries(
-      [...shardIndex].map(([term, postings]) => [term, postings])
-    ),
-    embeddings: Object.fromEntries(
-      [...shardEmbeddings].map(([k, v]) => [k, Array.from(v)])
-    ),
-  }
-}
-
-async function saveIndexToHub(forceAll = false) {
-  if (!indexData) return
+async function saveDbToHub() {
   try {
-    const shardIds = getActiveShardIds()
-    const toSave = forceAll ? [...shardIds] : [...shardIds].filter(id => !uploadedShards.has(id))
-    if (!forceAll) {
-      for (const id of dirtyShards) {
-        if (shardIds.has(id) && !toSave.includes(id)) toSave.push(id)
-      }
-    }
-    if (toSave.length === 0) return
+    const dbPath = getDbPath()
+    if (!fs.existsSync(dbPath)) return
 
-    const files = []
-    for (const sid of toSave) {
-      const payload = JSON.stringify(buildShardPayload(sid))
-      files.push({ path: `index_${sid}.json`, content: new Blob([payload]) })
-      console.log(`[server] Shard ${sid}: ${(Buffer.byteLength(payload) / 1024 / 1024).toFixed(1)} MB, pages: ${JSON.parse(payload).pageData ? Object.keys(JSON.parse(payload).pageData).length : '?'}`)
-    }
-
-    files.push({
-      path: 'meta.json',
-      content: new Blob([JSON.stringify({
-        totalShards: Math.max(...shardIds),
-        pagesPerShard: PAGES_PER_SHARD,
-        totalPages: indexData.pageData.size,
-      })]),
-    })
+    const dbBuffer = fs.readFileSync(dbPath)
+    const sizeMB = (dbBuffer.length / 1024 / 1024).toFixed(1)
+    console.log(`[server] Uploading DB to HuggingFace (${sizeMB} MB)...`)
 
     await uploadFiles({
       repo: { type: 'dataset', name: HF_REPO },
-      files,
+      files: [{ path: 'search.db', content: new Blob([dbBuffer]) }],
       credentials: { accessToken: HF_TOKEN },
     })
-
-    for (const sid of toSave) {
-      uploadedShards.add(sid)
-      dirtyShards.delete(sid)
-    }
-    console.log(`[server] Saved ${toSave.length} shard(s) to HuggingFace (${indexData.pageData.size} pages total).`)
+    console.log(`[server] DB uploaded to HuggingFace.`)
   } catch (err) {
-    console.log(`[server] HF save failed: ${err.message}`)
+    console.log(`[server] HF upload failed: ${err.message}`)
   }
 }
 
-function mergeShardIntoIndex(raw) {
-  const shardPageData = new Map()
-  for (const [k, v] of Object.entries(raw.pageData || {})) {
-    shardPageData.set(Number(k), { url: v.url, title: v.title, text: v.text || '' })
-  }
-  const shardEmbeddings = new Map()
-  for (const [k, v] of Object.entries(raw.embeddings || {})) {
-    shardEmbeddings.set(Number(k), v)
-  }
-
-  if (!indexData) {
-    const shardIndex = new Map()
-    for (const [term, postings] of Object.entries(raw.index || {})) {
-      shardIndex.set(term, postings)
-    }
-    indexData = { index: shardIndex, pageData: shardPageData, embeddings: shardEmbeddings }
-    return
-  }
-
-  for (const [id, data] of shardPageData) {
-    indexData.pageData.set(id, data)
-  }
-  for (const [id, emb] of shardEmbeddings) {
-    indexData.embeddings.set(id, emb)
-  }
-  for (const [term, postings] of Object.entries(raw.index || {})) {
-    if (!indexData.index.has(term)) {
-      indexData.index.set(term, postings)
-    } else {
-      const existing = indexData.index.get(term)
-      const existingIds = new Set(existing.map(p => p.pageId))
-      for (const p of postings) {
-        if (!existingIds.has(p.pageId)) existing.push(p)
-      }
-    }
-  }
-}
-
-async function loadIndexFromHub() {
+async function loadDbFromHub() {
   try {
-    let metaBlob
-    try {
-      metaBlob = await downloadFile({
-        repo: { type: 'dataset', name: HF_REPO },
-        path: 'meta.json',
-        credentials: { accessToken: HF_TOKEN },
-      })
-    } catch {}
+    const blob = await downloadFile({
+      repo: { type: 'dataset', name: HF_REPO },
+      path: 'search.db',
+      credentials: { accessToken: HF_TOKEN },
+    })
+    if (!blob) return false
 
-    if (metaBlob) {
-      const metaText = await metaBlob.text()
-      const meta = JSON.parse(metaText)
-      console.log(`[server] Found ${meta.totalShards} shard(s) on HuggingFace.`)
+    const dbPath = getDbPath()
+    const dir = path.dirname(dbPath)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 
-      for (let sid = 1; sid <= meta.totalShards; sid++) {
-        try {
-          const blob = await downloadFile({
-            repo: { type: 'dataset', name: HF_REPO },
-            path: `index_${sid}.json`,
-            credentials: { accessToken: HF_TOKEN },
-          })
-          if (!blob) continue
-          const text = await blob.text()
-          const raw = JSON.parse(text)
-          mergeShardIntoIndex(raw)
-          uploadedShards.add(sid)
-          console.log(`[server] Loaded shard ${sid}/${meta.totalShards} (${Object.keys(raw.pageData || {}).length} pages).`)
-        } catch (err) {
-          console.log(`[server] Shard ${sid} load failed: ${err.message}`)
-        }
-      }
-
-      if (indexData) {
-        console.log(
-          `[server] Total: ${indexData.pageData.size} pages, ${indexData.index.size} terms, ${indexData.embeddings.size} embeddings.`
-        )
-        return true
-      }
-      return false
-    }
-
-    try {
-      const blob = await downloadFile({
-        repo: { type: 'dataset', name: HF_REPO },
-        path: 'index.json',
-        credentials: { accessToken: HF_TOKEN },
-      })
-      if (!blob) return false
-      const text = await blob.text()
-      const raw = JSON.parse(text)
-      indexData = deserializeIndex(raw)
-      console.log(
-        `[server] Loaded legacy index from HuggingFace (${indexData.pageData.size} pages, ${indexData.index.size} terms, ${indexData.embeddings.size} embeddings).`
-      )
-      return true
-    } catch {
-      return false
-    }
+    const buffer = Buffer.from(await blob.arrayBuffer())
+    fs.writeFileSync(dbPath, buffer)
+    const sizeMB = (buffer.length / 1024 / 1024).toFixed(1)
+    console.log(`[server] Downloaded DB from HuggingFace (${sizeMB} MB).`)
+    return true
   } catch (err) {
-    console.log(`[server] HF load failed: ${err.message}`)
+    console.log(`[server] HF download failed: ${err.message}`)
     return false
   }
 }
@@ -606,20 +437,20 @@ async function embedQuery(query) {
 
 async function processEmbedQueue() {
   if (!indexData) return
-  const missing = getMissingEmbeddingIds(indexData)
+  const missing = await getMissingEmbeddingIds(indexData)
   if (missing.length === 0) return
 
+  const { getPageDataBatch } = await import('./db.js')
   const batch = missing.slice(0, EMBED_BATCH_SIZE)
-  const texts = batch.map(id => {
-    const p = indexData.pageData.get(id)
-    return `${p.title} ${p.text}`.substring(0, 500)
-  })
+  const pages = await getPageDataBatch(batch)
+  const texts = pages.map(p => `${p.title} ${p.text}`.substring(0, 500))
 
   try {
     console.log(`[embed] Computing embeddings for ${batch.length} pages...`)
     const embeddings = await embedTexts(texts)
-    setEmbeddings(indexData, batch, embeddings)
-    console.log(`[embed] Done. Total embedded: ${indexData.embeddings.size}/${indexData.pageData.size}`)
+    await setEmbeddings(indexData, batch, embeddings)
+    const stats = await getIndexStats(indexData)
+    console.log(`[embed] Done. Total embedded: ${stats.embeddings}/${stats.pages}`)
 
     if (missing.length > EMBED_BATCH_SIZE) {
       setTimeout(() => processEmbedQueue(), 2000)
@@ -634,8 +465,9 @@ async function backgroundCrawlLoop() {
 
   while (true) {
     const useQueryCrawl = crawler.prioritySize > 0 && Math.random() < QUERY_CRAWL_CHANCE
-    const page = await crawler.fetchNext(useQueryCrawl)
-    if (!page) {
+    const pages = await crawler.fetchBatch(CONCURRENT_FETCHES, useQueryCrawl)
+
+    if (pages.length === 0) {
       const topTerms = getTopSearchTerms(5)
       for (const term of topTerms) {
         crawler.addUrls(generateQueryUrls(term), true)
@@ -644,23 +476,30 @@ async function backgroundCrawlLoop() {
       continue
     }
 
-    if (!knownUrls.has(page.url)) {
-      knownUrls.add(page.url)
-      addToIndex(indexData, [page])
-      pagesSinceLastSave++
-      crawledByBg++
-      dirtyShards.add(getShardId(indexData.pageData.size - 1))
-
-      if (pagesSinceLastSave >= SAVE_INTERVAL) {
-        pagesSinceLastSave = 0
-        await saveIndexToHub()
-        await processEmbedQueue()
+    const newPages = []
+    for (const p of pages) {
+      if (!knownUrls.has(p.url)) {
+        knownUrls.add(p.url)
+        newPages.push(p)
       }
     }
 
-    if (crawledByBg % 100 === 0) {
+    if (newPages.length > 0) {
+      await addToIndex(indexData, newPages)
+      pagesSinceLastSave += newPages.length
+      crawledByBg += newPages.length
+    }
+
+    if (pagesSinceLastSave >= SAVE_INTERVAL) {
+      pagesSinceLastSave = 0
+      await saveDbToHub()
+      await processEmbedQueue()
+    }
+
+    if (crawledByBg % 50 === 0 && crawledByBg > 0) {
+      const stats = await getIndexStats(indexData)
       console.log(
-        `[crawler] ${crawledByBg} bg pages | queue: ${crawler.queueSize} | priority: ${crawler.prioritySize} | indexed: ${indexData.pageData.size} pages, ${indexData.embeddings.size} embeddings`
+        `[crawler] ${crawledByBg} bg pages | queue: ${crawler.queueSize} | priority: ${crawler.prioritySize} | indexed: ${stats.pages} pages, ${stats.embeddings} embeddings`
       )
     }
 
@@ -669,20 +508,24 @@ async function backgroundCrawlLoop() {
 }
 
 async function seedIfNeeded() {
-  if (await loadIndexFromHub()) {
-    for (const [, data] of indexData.pageData) {
-      knownUrls.add(data.url)
-    }
+  const loaded = await loadDbFromHub()
+  await initDb()
+
+  if (loaded) {
+    knownUrls = await getAllUrls()
+    const stats = await getIndexStats(null)
+    console.log(`[server] Loaded DB: ${stats.pages} pages, ${stats.terms} terms, ${stats.embeddings} embeddings.`)
+    indexData = { db: (await import('./db.js')).getDb() }
     return
   }
 
-  console.log('[server] No index found. Seeding with default pages...')
+  console.log('[server] No DB found. Seeding with default pages...')
   const { crawl } = await import('./crawler.js')
   const pages = await crawl(SEED_URLS, 50)
-  indexData = buildIndex(pages)
+  indexData = await buildIndex(pages)
   for (const p of pages) knownUrls.add(p.url)
   await ensureRepoExists()
-  await saveIndexToHub(true)
+  await saveDbToHub()
 }
 
 // ─── API Endpoints ───
@@ -704,7 +547,7 @@ app.get('/api/search', async (req, res) => {
     queryEmbedding = await embedQuery(q)
   } catch {}
 
-  const results = search(indexData, q, queryEmbedding)
+  const results = await search(indexData, q, queryEmbedding)
   res.json({ query: q, count: results.length, results })
 })
 
@@ -757,13 +600,14 @@ app.post('/api/crawl', async (req, res) => {
   }
 })
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  const stats = indexData ? await getIndexStats(indexData) : { pages: 0, terms: 0, embeddings: 0 }
   res.json({
     status: 'ok',
     indexed: indexData !== null,
-    totalPages: indexData?.pageData.size || 0,
-    totalTerms: indexData?.index.size || 0,
-    embeddings: indexData?.embeddings.size || 0,
+    totalPages: stats.pages,
+    totalTerms: stats.terms,
+    embeddings: stats.embeddings,
     crawledByBg,
     queueSize: crawler?.queueSize || 0,
     priorityQueue: crawler?.prioritySize || 0,
@@ -771,20 +615,15 @@ app.get('/api/health', (req, res) => {
     isCrawling: !!crawler,
     topSearches: getTopSearchTerms(5),
     totalSearches: searchHistory.size,
-    shards: {
-      active: getActiveShardIds().size,
-      dirty: dirtyShards.size,
-      uploaded: uploadedShards.size,
-      pagesPerShard: PAGES_PER_SHARD,
-    },
   })
 })
 
 app.post('/api/reindex', async (req, res) => {
   if (!indexData) return res.status(400).json({ error: 'No index loaded.' })
-  await saveIndexToHub(true)
+  await saveDbToHub()
   await processEmbedQueue()
-  res.json({ message: 'Reindex triggered.', totalPages: indexData.pageData.size })
+  const stats = await getIndexStats(indexData)
+  res.json({ message: 'Reindex triggered.', totalPages: stats.pages })
 })
 
 // ─── Startup ───

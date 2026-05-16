@@ -1,7 +1,7 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Search Engine Backend",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -15,9 +15,12 @@
   "dependencies": {
     "@huggingface/hub": "^2.12.0",
     "@huggingface/inference": "^4.13.15",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "groq-sdk": "^1.2.0",
-    "node-html-parser": "^7.1.0"
+    "node-html-parser": "^7.1.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
   }
 }

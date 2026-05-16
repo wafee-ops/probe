@@ -89,6 +89,36 @@ export function createCrawler(seedUrls) {
     }
   }
 
+  function pickUrl(preferPriority = false) {
+    const sources = []
+    if (preferPriority && priorityQueue.size > 0) sources.push(priorityQueue)
+    if (queue.size > 0) sources.push(queue)
+    if (priorityQueue.size > 0) sources.push(priorityQueue)
+    if (lowQueue.size > 0) sources.push(lowQueue)
+
+    for (const source of sources) {
+      while (source.size > 0) {
+        const url = source.values().next().value
+        source.delete(url)
+        if (!visited.has(url)) {
+          visited.add(url)
+          return url
+        }
+      }
+    }
+    return null
+  }
+
+  function addFoundLinks(links, pageUrl) {
+    for (const link of links) {
+      const normalized = normalizeUrl(link)
+      if (normalized && !visited.has(normalized)) {
+        if (isDeprioritized(normalized)) lowQueue.add(normalized)
+        else queue.add(normalized)
+      }
+    }
+  }
+
   return {
     visited,
     queue,
@@ -110,37 +140,54 @@ export function createCrawler(seedUrls) {
     },
 
     async fetchNext(preferPriority = false) {
-      const source = (preferPriority && priorityQueue.size > 0) ? priorityQueue : queue
-      const fallback = (queue.size > 0) ? queue : (priorityQueue.size > 0) ? priorityQueue : lowQueue
-      const chosen = source.size > 0 ? source : fallback
+      const url = pickUrl(preferPriority)
+      if (!url) return null
 
-      while (chosen.size > 0) {
-        const url = chosen.values().next().value
-        chosen.delete(url)
-
-        if (visited.has(url)) continue
-        visited.add(url)
-
-        try {
-          const html = await fetchPage(url)
-          const title = extractTitle(html)
-          const text = extractText(html)
-          const links = getLinks(html, url)
-
-          for (const link of links) {
-            const normalized = normalizeUrl(link)
-            if (normalized && !visited.has(normalized)) {
-              if (isDeprioritized(normalized)) lowQueue.add(normalized)
-              else queue.add(normalized)
-            }
-          }
-
-          return { url, title, text }
-        } catch (err) {
-          console.log(`[crawler] Skipping ${url}: ${err.message}`)
-        }
+      try {
+        const html = await fetchPage(url)
+        const title = extractTitle(html)
+        const text = extractText(html)
+        const links = getLinks(html, url)
+        addFoundLinks(links, url)
+        return { url, title, text }
+      } catch (err) {
+        console.log(`[crawler] Skipping ${url}: ${err.message}`)
+        return null
       }
-      return null
+    },
+
+    async fetchBatch(count = 5, preferPriority = false) {
+      const urls = []
+      for (let i = 0; i < count; i++) {
+        const url = pickUrl(preferPriority)
+        if (url) urls.push(url)
+      }
+
+      if (urls.length === 0) return []
+
+      const settled = await Promise.allSettled(
+        urls.map(async url => {
+          const html = await fetchPage(url)
+          return { url, html }
+        })
+      )
+
+      const pages = []
+      for (let i = 0; i < settled.length; i++) {
+        const result = settled[i]
+        if (result.status !== 'fulfilled') {
+          console.log(`[crawler] Skipping ${urls[i]}: ${result.reason?.message || 'error'}`)
+          continue
+        }
+        const { url, html } = result.value
+        const title = extractTitle(html)
+        const text = extractText(html)
+        const links = getLinks(html, url)
+        addFoundLinks(links, url)
+        pages.push({ url, title, text })
+      }
+
+      return pages
     },
 
     get queueSize() {
@@ -162,10 +209,11 @@ export async function crawl(seedUrls, maxPages = 100) {
   const pages = []
 
   while (pages.length < maxPages) {
-    console.log(`[crawler] Fetching (${pages.length + 1}/${maxPages}): ${crawler.queue.values().next().value}`)
-    const page = await crawler.fetchNext()
-    if (!page) break
-    pages.push(page)
+    const batchSize = Math.min(5, maxPages - pages.length)
+    const batch = await crawler.fetchBatch(batchSize)
+    if (batch.length === 0) break
+    pages.push(...batch)
+    console.log(`[crawler] Fetched ${pages.length}/${maxPages} pages...`)
   }
 
   console.log(`[crawler] Done. Collected ${pages.length} pages.`)
