@@ -4,9 +4,7 @@ import './App.css'
 function App() {
   const [query, setQuery] = useState('')
   const [results, setResults] = useState(null)
-  const [overview, setOverview] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [overviewLoading, setOverviewLoading] = useState(false)
   const [error, setError] = useState(null)
 
   async function handleSearch() {
@@ -14,10 +12,8 @@ function App() {
     if (!trimmed) return
 
     setLoading(true)
-    setOverviewLoading(true)
     setError(null)
     setResults(null)
-    setOverview(null)
 
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`)
@@ -33,16 +29,6 @@ function App() {
       setError('Failed to reach the server.')
     } finally {
       setLoading(false)
-    }
-
-    try {
-      const res = await fetch(`/api/overview?q=${encodeURIComponent(trimmed)}`)
-      const data = await res.json()
-      if (res.ok) setOverview(data.overview)
-    } catch {
-      // overview is optional — silently ignore
-    } finally {
-      setOverviewLoading(false)
     }
   }
 
@@ -79,30 +65,6 @@ function App() {
 
       {results && results.length === 0 && (
         <p className="status">No results found for "{query}".</p>
-      )}
-
-      {overviewLoading && (
-        <div className="ai-overview">
-          <div className="ai-overview-header">
-            <svg className="ai-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93"/><path d="M8.56 6.22A4 4 0 0 1 12 2"/><path d="M12 12a8 8 0 0 0-8 8h16a8 8 0 0 0-8-8"/><circle cx="12" cy="6" r="4"/></svg>
-            <span>AI Overview</span>
-          </div>
-          <div className="ai-overview-loading">
-            <span className="loading-dot" />
-            <span className="loading-dot" />
-            <span className="loading-dot" />
-          </div>
-        </div>
-      )}
-
-      {overview && !overviewLoading && (
-        <div className="ai-overview">
-          <div className="ai-overview-header">
-            <svg className="ai-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 1 4 4c0 1.95-1.4 3.58-3.25 3.93"/><path d="M8.56 6.22A4 4 0 0 1 12 2"/><path d="M12 12a8 8 0 0 0-8 8h16a8 8 0 0 0-8-8"/><circle cx="12" cy="6" r="4"/></svg>
-            <span>AI Overview</span>
-          </div>
-          <p className="ai-overview-text">{overview}</p>
-        </div>
       )}
 
       {results && results.length > 0 && (

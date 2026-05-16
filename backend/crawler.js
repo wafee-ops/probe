@@ -56,41 +56,67 @@ async function fetchPage(url) {
   return res.text()
 }
 
-export async function crawl(seedUrls, maxPages = 100) {
+export function createCrawler(seedUrls) {
   const visited = new Set()
-  const queue = []
-  const pages = []
+  const queue = new Set()
 
   for (const url of seedUrls) {
     const normalized = normalizeUrl(url)
-    if (normalized) queue.push(normalized)
+    if (normalized) queue.add(normalized)
   }
 
-  while (queue.length > 0 && pages.length < maxPages) {
-    const url = queue.shift()
+  return {
+    visited,
+    queue,
 
-    if (visited.has(url)) continue
-    visited.add(url)
+    async fetchNext() {
+      while (queue.size > 0) {
+        const url = queue.values().next().value
+        queue.delete(url)
 
-    console.log(`[crawler] Fetching (${pages.length + 1}/${maxPages}): ${url}`)
+        if (visited.has(url)) continue
+        visited.add(url)
 
-    try {
-      const html = await fetchPage(url)
-      const title = extractTitle(html)
-      const text = extractText(html)
-      const links = getLinks(html, url)
+        try {
+          const html = await fetchPage(url)
+          const title = extractTitle(html)
+          const text = extractText(html)
+          const links = getLinks(html, url)
 
-      pages.push({ url, title, text })
+          for (const link of links) {
+            const normalized = normalizeUrl(link)
+            if (normalized && !visited.has(normalized)) {
+              queue.add(normalized)
+            }
+          }
 
-      for (const link of links) {
-        const normalized = normalizeUrl(link)
-        if (normalized && !visited.has(normalized) && !queue.includes(normalized)) {
-          queue.push(normalized)
+          return { url, title, text }
+        } catch (err) {
+          console.log(`[crawler] Skipping ${url}: ${err.message}`)
         }
       }
-    } catch (err) {
-      console.log(`[crawler] Skipping ${url}: ${err.message}`)
-    }
+      return null
+    },
+
+    get queueSize() {
+      return queue.size
+    },
+
+    get visitedSize() {
+      return visited.size
+    },
+  }
+}
+
+export async function crawl(seedUrls, maxPages = 100) {
+  const crawler = createCrawler(seedUrls)
+  const pages = []
+
+  while (pages.length < maxPages) {
+    console.log(`[crawler] Fetching (${pages.length + 1}/${maxPages}): ${crawler.queue.values().next().value}`)
+    const page = await crawler.fetchNext()
+    if (!page) break
+    pages.push(page)
   }
 
   console.log(`[crawler] Done. Collected ${pages.length} pages.`)
