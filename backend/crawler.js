@@ -1,5 +1,24 @@
 import { parse } from 'node-html-parser'
 
+const DEPRIORITIZED_HOSTNAMES = [
+  'en.wikipedia.org',
+  'wikipedia.org',
+  'simple.wikipedia.org',
+  'wikimedia.org',
+  'wikidata.org',
+  'mediawiki.org',
+  'meta.wikimedia.org',
+]
+
+function isDeprioritized(url) {
+  try {
+    const hostname = new URL(url).hostname
+    return DEPRIORITIZED_HOSTNAMES.some(b => hostname === b || hostname.endsWith('.' + b))
+  } catch {
+    return false
+  }
+}
+
 function normalizeUrl(url) {
   try {
     const parsed = new URL(url)
@@ -59,20 +78,45 @@ async function fetchPage(url) {
 export function createCrawler(seedUrls) {
   const visited = new Set()
   const queue = new Set()
+  const priorityQueue = new Set()
+  const lowQueue = new Set()
 
   for (const url of seedUrls) {
     const normalized = normalizeUrl(url)
-    if (normalized) queue.add(normalized)
+    if (normalized) {
+      if (isDeprioritized(normalized)) lowQueue.add(normalized)
+      else queue.add(normalized)
+    }
   }
 
   return {
     visited,
     queue,
+    priorityQueue,
+    lowQueue,
 
-    async fetchNext() {
-      while (queue.size > 0) {
-        const url = queue.values().next().value
-        queue.delete(url)
+    addUrls(urls, priority = false) {
+      for (const url of urls) {
+        const normalized = normalizeUrl(url)
+        if (!normalized || visited.has(normalized)) continue
+        if (priority) {
+          priorityQueue.add(normalized)
+        } else if (isDeprioritized(normalized)) {
+          lowQueue.add(normalized)
+        } else {
+          queue.add(normalized)
+        }
+      }
+    },
+
+    async fetchNext(preferPriority = false) {
+      const source = (preferPriority && priorityQueue.size > 0) ? priorityQueue : queue
+      const fallback = (queue.size > 0) ? queue : (priorityQueue.size > 0) ? priorityQueue : lowQueue
+      const chosen = source.size > 0 ? source : fallback
+
+      while (chosen.size > 0) {
+        const url = chosen.values().next().value
+        chosen.delete(url)
 
         if (visited.has(url)) continue
         visited.add(url)
@@ -86,7 +130,8 @@ export function createCrawler(seedUrls) {
           for (const link of links) {
             const normalized = normalizeUrl(link)
             if (normalized && !visited.has(normalized)) {
-              queue.add(normalized)
+              if (isDeprioritized(normalized)) lowQueue.add(normalized)
+              else queue.add(normalized)
             }
           }
 
@@ -99,11 +144,15 @@ export function createCrawler(seedUrls) {
     },
 
     get queueSize() {
-      return queue.size
+      return queue.size + lowQueue.size
     },
 
     get visitedSize() {
       return visited.size
+    },
+
+    get prioritySize() {
+      return priorityQueue.size
     },
   }
 }

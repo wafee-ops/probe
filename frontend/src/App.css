@@ -23,6 +23,17 @@
   margin: 0 0 48px 0;
   letter-spacing: -1px;
   transition: font-size 0.3s ease, margin-bottom 0.3s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.title-logo {
+  height: 1.5em;
+  width: auto;
+  vertical-align: middle;
+  margin: 0.4em -0.3em 0 -0.3em;
+  filter: brightness(1.4);
 }
 
 .search-container {
@@ -127,8 +138,4 @@
   color: #bdc1c6;
 }
 
-.result-score {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 12px;
-  color: #555;
-}
+

@@ -7,9 +7,23 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  function isUrl(text) {
+    const trimmed = text.trim()
+    if (/^https?:\/\//i.test(trimmed)) return true
+    if (/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+\//.test(trimmed)) return true
+    if (/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.[a-zA-Z]{2,}(\/\S*)?$/.test(trimmed)) return true
+    return false
+  }
+
   async function handleSearch() {
     const trimmed = query.trim()
     if (!trimmed) return
+
+    if (isUrl(trimmed)) {
+      const url = /^https?:\/\//i.test(trimmed) ? trimmed : 'https://' + trimmed
+      window.location.href = url
+      return
+    }
 
     setLoading(true)
     setError(null)
@@ -40,7 +54,9 @@ function App() {
 
   return (
     <div className="app">
-      <h1 className="title">Probe</h1>
+      <h1 className="title">
+        Pr<img src="/logo.png" alt="o" className="title-logo" />be
+      </h1>
       <div className="search-container">
         <div className="search-wrapper">
           <input
@@ -74,8 +90,16 @@ function App() {
               <a href={r.url} target="_blank" rel="noopener noreferrer" className="result-title">
                 {r.title || r.url}
               </a>
-              <span className="result-url">{r.url}</span>
-              <span className="result-score">relevance: {r.score.toFixed(2)}</span>
+              <span className="result-url">
+                {(() => {
+                  try {
+                    const u = new URL(r.url)
+                    return [u.origin, ...u.pathname.split('/').filter(Boolean)].join(' > ')
+                  } catch {
+                    return r.url
+                  }
+                })()}
+              </span>
             </li>
           ))}
         </ul>
