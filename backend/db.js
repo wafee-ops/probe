@@ -1,20 +1,19 @@
-import sqlite3 from 'sqlite3'
-import { open } from 'sqlite'
+import Database from 'better-sqlite3'
+import { mkdirSync } from 'fs'
+import { dirname } from 'path'
 
 const DB_PATH = './data/search.db'
 
 let db = null
 
 export async function initDb() {
-  db = await open({
-    filename: DB_PATH,
-    driver: sqlite3.Database,
-  })
+  mkdirSync(dirname(DB_PATH), { recursive: true })
 
-  await db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
+  db = new Database(DB_PATH)
+  db.pragma('journal_mode = WAL')
+  db.pragma('synchronous = NORMAL')
 
+  db.exec(`
     CREATE TABLE IF NOT EXISTS pages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       url TEXT NOT NULL UNIQUE,
@@ -51,101 +50,108 @@ export function getDb() {
 }
 
 export async function insertPages(pages) {
-  const stmt = await db.prepare('INSERT OR IGNORE INTO pages (url, title, text) VALUES (?, ?, ?)')
+  const insert = db.prepare('INSERT OR IGNORE INTO pages (url, title, text) VALUES (?, ?, ?)')
+  const lookup = db.prepare('SELECT id FROM pages WHERE url = ?')
   const ids = []
-  for (const { url, title, text } of pages) {
-    await stmt.run(url, title || '', text || '')
-    const row = await db.get('SELECT id FROM pages WHERE url = ?', url)
-    ids.push(row.id)
-  }
-  await stmt.finalize()
+
+  const txn = db.transaction(() => {
+    for (const { url, title, text } of pages) {
+      insert.run(url, title || '', text || '')
+      const row = lookup.get(url)
+      ids.push(row.id)
+    }
+  })
+  txn()
+
   return ids
 }
 
 export async function insertPostings(pageId, termFreqs) {
-  const stmt = await db.prepare('INSERT OR REPLACE INTO postings (term, page_id, freq) VALUES (?, ?, ?)')
-  for (const [term, freq] of termFreqs) {
-    await stmt.run(term, pageId, freq)
-  }
-  await stmt.finalize()
+  const stmt = db.prepare('INSERT OR REPLACE INTO postings (term, page_id, freq) VALUES (?, ?, ?)')
+
+  const txn = db.transaction(() => {
+    for (const [term, freq] of termFreqs) {
+      stmt.run(term, pageId, freq)
+    }
+  })
+  txn()
 }
 
 export async function insertEmbeddings(pageIds, embeddings) {
-  const stmt = await db.prepare('INSERT OR REPLACE INTO embeddings (page_id, vector) VALUES (?, ?)')
-  for (let i = 0; i < pageIds.length; i++) {
-    await stmt.run(pageIds[i], JSON.stringify(embeddings[i]))
-  }
-  await stmt.finalize()
+  const stmt = db.prepare('INSERT OR REPLACE INTO embeddings (page_id, vector) VALUES (?, ?)')
+
+  const txn = db.transaction(() => {
+    for (let i = 0; i < pageIds.length; i++) {
+      stmt.run(pageIds[i], JSON.stringify(embeddings[i]))
+    }
+  })
+  txn()
 }
 
 export async function getPageCount() {
-  const row = await db.get('SELECT COUNT(*) as count FROM pages')
+  const row = db.prepare('SELECT COUNT(*) as count FROM pages').get()
   return row.count
 }
 
 export async function getPageData(pageId) {
-  return db.get('SELECT id, url, title, text FROM pages WHERE id = ?', pageId)
+  return db.prepare('SELECT id, url, title, text FROM pages WHERE id = ?').get(pageId)
 }
 
 export async function getPageDataBatch(pageIds) {
   if (pageIds.length === 0) return []
   const placeholders = pageIds.map(() => '?').join(',')
-  return db.all(`SELECT id, url, title, text FROM pages WHERE id IN (${placeholders})`, pageIds)
+  return db.prepare(`SELECT id, url, title, text FROM pages WHERE id IN (${placeholders})`).all(...pageIds)
 }
 
 export async function getDocFreq(term) {
-  const row = await db.get('SELECT COUNT(DISTINCT page_id) as df FROM postings WHERE term = ?', term)
+  const row = db.prepare('SELECT COUNT(DISTINCT page_id) as df FROM postings WHERE term = ?').get(term)
   return row.df
 }
 
 export async function batchSearchTerms(terms) {
   if (terms.length === 0) return []
   const placeholders = terms.map(() => '?').join(',')
-  return db.all(
-    `SELECT term, page_id, freq FROM postings WHERE term IN (${placeholders})`,
-    terms
-  )
+  return db.prepare(`SELECT term, page_id, freq FROM postings WHERE term IN (${placeholders})`).all(...terms)
 }
 
 export async function getDocLengths(pageIds) {
   if (pageIds.length === 0) return new Map()
   const placeholders = pageIds.map(() => '?').join(',')
-  const rows = await db.all(
-    `SELECT page_id, SUM(freq) as len FROM postings WHERE page_id IN (${placeholders}) GROUP BY page_id`,
-    pageIds
-  )
+  const rows = db.prepare(
+    `SELECT page_id, SUM(freq) as len FROM postings WHERE page_id IN (${placeholders}) GROUP BY page_id`
+  ).all(...pageIds)
   const map = new Map()
   for (const row of rows) map.set(row.page_id, row.len)
   return map
 }
 
 export async function getAvgDocLength() {
-  const row = await db.get(
+  const row = db.prepare(
     'SELECT SUM(freq) * 1.0 / COUNT(DISTINCT page_id) as avg FROM postings'
-  )
+  ).get()
   return row.avg || 0
 }
 
 export async function searchTerm(term) {
-  return db.all('SELECT page_id, freq FROM postings WHERE term = ?', term)
+  return db.prepare('SELECT page_id, freq FROM postings WHERE term = ?').all(term)
 }
 
 export async function getMissingEmbeddingIds() {
-  const rows = await db.all(`
+  const rows = db.prepare(`
     SELECT p.id FROM pages p
     LEFT JOIN embeddings e ON p.id = e.page_id
     WHERE e.page_id IS NULL
-  `)
+  `).all()
   return rows.map(r => r.id)
 }
 
 export async function getEmbedding(pageId) {
-  const row = await db.get('SELECT vector FROM embeddings WHERE page_id = ?', pageId)
+  const row = db.prepare('SELECT vector FROM embeddings WHERE page_id = ?').get(pageId)
   return row ? JSON.parse(row.vector) : null
 }
 
 export async function getAllEmbeddings() {
-  const rows = await db.all('SELECT page_id, vector FROM embeddings')
+  const rows = db.prepare('SELECT page_id, vector FROM embeddings').all()
   const map = new Map()
   for (const { page_id, vector } of rows) {
     map.set(page_id, JSON.parse(vector))
@@ -154,17 +160,17 @@ export async function getAllEmbeddings() {
 }
 
 export async function getAllUrls() {
-  const rows = await db.all('SELECT url FROM pages')
+  const rows = db.prepare('SELECT url FROM pages').all()
   return new Set(rows.map(r => r.url))
 }
 
 export async function getMaxPageId() {
-  const row = await db.get('SELECT MAX(id) as maxId FROM pages')
+  const row = db.prepare('SELECT MAX(id) as maxId FROM pages').get()
   return row.maxId || 0
 }
 
 export async function closeDb() {
-  if (db) await db.close()
+  if (db) db.close()
 }
 
 export function getDbPath() {
