@@ -190,9 +190,9 @@ export async function getIndexStats(indexData) {
   const db = getDb()
   if (!db) return { pages: 0, terms: 0, embeddings: 0 }
 
-  const pageRow = await db.get('SELECT COUNT(*) as c FROM pages')
-  const termRow = await db.get('SELECT COUNT(DISTINCT term) as c FROM postings')
-  const embRow = await db.get('SELECT COUNT(*) as c FROM embeddings')
+  const pageRow = db.prepare('SELECT COUNT(*) as c FROM pages').get()
+  const termRow = db.prepare('SELECT COUNT(DISTINCT term) as c FROM postings').get()
+  const embRow = db.prepare('SELECT COUNT(*) as c FROM embeddings').get()
 
   return {
     pages: pageRow.c,
