@@ -11,7 +11,7 @@ import {
   getAvgDocLength,
   getMissingEmbeddingIds as dbGetMissingEmbeddingIds,
   getEmbedding,
-  getAllEmbeddings,
+  streamEmbeddings,
   getMaxPageId,
   getDb,
 } from './db.js'
@@ -150,13 +150,14 @@ export async function search(indexData, query, queryEmbedding = null) {
 
   if (queryEmbedding) {
     const normQuery = normalizeVector(queryEmbedding)
-    const allEmbeddings = await getAllEmbeddings()
     const SIM_THRESHOLD = 0.25
 
-    for (const [pageId, emb] of allEmbeddings) {
-      const sim = cosineSimilarity(normQuery, emb)
-      if (sim > SIM_THRESHOLD) {
-        scores.set(pageId, (scores.get(pageId) || 0) + sim * 50)
+    for (const batch of streamEmbeddings()) {
+      for (const { pageId, vector } of batch) {
+        const sim = cosineSimilarity(normQuery, vector)
+        if (sim > SIM_THRESHOLD) {
+          scores.set(pageId, (scores.get(pageId) || 0) + sim * 50)
+        }
       }
     }
   }

@@ -21,11 +21,12 @@ const HF_TOKEN = process.env.VITE_HUGGINGFACE_API_KEY
 const GROQ_KEY = process.env.VITE_GROQ_API_KEY
 const HF_REPO = 'Wafee8/indexed_pages'
 const EMBED_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
-const EMBED_BATCH_SIZE = 32
-const SAVE_INTERVAL = 50
-const CONCURRENT_FETCHES = 5
-const CRAWL_DELAY_MS = 300
+const EMBED_BATCH_SIZE = 8
+const SAVE_INTERVAL = 30
+const CONCURRENT_FETCHES = 2
+const CRAWL_DELAY_MS = 500
 const QUERY_CRAWL_CHANCE = 0.35
+const MEMORY_LIMIT_MB = 400
 
 const hf = new InferenceClient(HF_TOKEN)
 const groq = GROQ_KEY ? new Groq({ apiKey: GROQ_KEY }) : null
@@ -310,6 +311,19 @@ let knownUrls = new Set()
 
 const seedSet = new Set(SEED_URLS.map(u => u.replace(/\/+$/, '')))
 
+function getMemoryMB() {
+  const usage = process.memoryUsage()
+  return {
+    rss: Math.round(usage.rss / 1024 / 1024),
+    heapUsed: Math.round(usage.heapUsed / 1024 / 1024),
+    heapTotal: Math.round(usage.heapTotal / 1024 / 1024),
+  }
+}
+
+function isMemoryPressure() {
+  return process.memoryUsage().heapUsed / 1024 / 1024 > MEMORY_LIMIT_MB
+}
+
 function generateQueryUrls(query) {
   const urls = []
   const encoded = encodeURIComponent(query)
@@ -371,6 +385,10 @@ async function saveDbToHub() {
     const dbPath = getDbPath()
     if (!fs.existsSync(dbPath)) return
 
+    const { getDb } = await import('./db.js')
+    const db = getDb()
+    if (db) db.pragma('wal_checkpoint(TRUNCATE)')
+
     const dbBuffer = fs.readFileSync(dbPath)
     const sizeMB = (dbBuffer.length / 1024 / 1024).toFixed(1)
     console.log(`[server] Uploading DB to HuggingFace (${sizeMB} MB)...`)
@@ -399,7 +417,8 @@ async function loadDbFromHub() {
     const dir = path.dirname(dbPath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 
-    const buffer = Buffer.from(await blob.arrayBuffer())
+    const arrayBuffer = await blob.arrayBuffer()
+    const buffer = Buffer.from(arrayBuffer)
     fs.writeFileSync(dbPath, buffer)
     const sizeMB = (buffer.length / 1024 / 1024).toFixed(1)
     console.log(`[server] Downloaded DB from HuggingFace (${sizeMB} MB).`)
@@ -437,6 +456,10 @@ async function embedQuery(query) {
 
 async function processEmbedQueue() {
   if (!indexData) return
+  if (isMemoryPressure()) {
+    console.log(`[embed] Skipping — memory pressure (${getMemoryMB().heapUsed}MB used)`)
+    return
+  }
   const missing = await getMissingEmbeddingIds(indexData)
   if (missing.length === 0) return
 
@@ -498,9 +521,16 @@ async function backgroundCrawlLoop() {
 
     if (crawledByBg % 50 === 0 && crawledByBg > 0) {
       const stats = await getIndexStats(indexData)
+      const mem = getMemoryMB()
       console.log(
-        `[crawler] ${crawledByBg} bg pages | queue: ${crawler.queueSize} | priority: ${crawler.prioritySize} | indexed: ${stats.pages} pages, ${stats.embeddings} embeddings`
+        `[crawler] ${crawledByBg} bg pages | queue: ${crawler.queueSize} | priority: ${crawler.prioritySize} | indexed: ${stats.pages} pages, ${stats.embeddings} embeddings | mem: ${mem.heapUsed}/${mem.rss}MB`
       )
+    }
+
+    if (isMemoryPressure()) {
+      console.log(`[crawler] Memory pressure detected (${getMemoryMB().heapUsed}MB), cooling down...`)
+      if (global.gc) global.gc()
+      await new Promise(r => setTimeout(r, 5000))
     }
 
     await new Promise(r => setTimeout(r, CRAWL_DELAY_MS))
@@ -602,6 +632,7 @@ app.post('/api/crawl', async (req, res) => {
 
 app.get('/api/health', async (req, res) => {
   const stats = indexData ? await getIndexStats(indexData) : { pages: 0, terms: 0, embeddings: 0 }
+  const mem = getMemoryMB()
   res.json({
     status: 'ok',
     indexed: indexData !== null,
@@ -615,6 +646,7 @@ app.get('/api/health', async (req, res) => {
     isCrawling: !!crawler,
     topSearches: getTopSearchTerms(5),
     totalSearches: searchHistory.size,
+    memory: mem,
   })
 })
 

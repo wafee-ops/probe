@@ -5,7 +5,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
+    "start": "node --expose-gc server.js",
     "build": "echo 'No build step required'",
     "dev": "node --watch server.js"
   },

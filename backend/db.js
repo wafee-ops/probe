@@ -159,6 +159,22 @@ export async function getAllEmbeddings() {
   return map
 }
 
+export function* streamEmbeddings(batchSize = 500) {
+  const totalRow = db.prepare('SELECT COUNT(*) as c FROM embeddings').get()
+  if (totalRow.c === 0) return
+
+  const stmt = db.prepare('SELECT page_id, vector FROM embeddings LIMIT ? OFFSET ?')
+  for (let offset = 0; offset < totalRow.c; offset += batchSize) {
+    const rows = stmt.all(batchSize, offset)
+    if (rows.length === 0) break
+    const batch = []
+    for (const { page_id, vector } of rows) {
+      batch.push({ pageId: page_id, vector: JSON.parse(vector) })
+    }
+    yield batch
+  }
+}
+
 export async function getAllUrls() {
   const rows = db.prepare('SELECT url FROM pages').all()
   return new Set(rows.map(r => r.url))
